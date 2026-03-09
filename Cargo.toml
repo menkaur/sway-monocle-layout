@@ -1,0 +1,15 @@
+[package]
+name = "smart-borders-dp2"
+version = "2.2.0"
+edition = "2021"
+description = "Manages a sway output as a single-focus display"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "signal", "macros"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
