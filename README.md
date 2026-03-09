@@ -1,106 +1,157 @@
-# smart-borders — Auto-Tabbed Layout Manager for Sway
+# sway-monocle-layout
 
-smart-borders is a lightweight Rust daemon that enhances the Sway window manager
-with intelligent single-monitor window management and an optional global
-focus-restoration engine.
+A lightweight Rust daemon that gives Sway a monocle layout with
+automatic tabbed fallback:
 
-With smart-borders, Sway behaves more like a polished tiling WM with
-smart fullscreen, automatic tabbing, border cleanup, and smart focus.
+- **1 window** → borderless, fills the workspace (transparency preserved)
+- **2+ windows** → tabbed layout, new windows auto-focused
+- **User changes layout** → daemon backs off until you switch back
+
+Also includes an independent **focus-back** mode that restores focus
+to the window you were using when a launched application closes.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [How It Works](#how-it-works)
+- [Building](#building)
+- [Usage](#usage)
+- [Sway Configuration](#sway-configuration)
+- [Move-to-Monitor Script](#move-to-monitor-script)
+- [Behavior Reference](#behavior-reference)
+- [FAQ](#faq)
+- [Project Structure](#project-structure)
+- [License](#license)
 
 ---
 
 ## Features
 
-### Monitor Mode (per-output management)
+### Monitor Mode
 
-On a selected output (e.g., DP-2):
+- **Single window**: removes borders and tab bar — the window fills
+  the entire workspace while keeping compositor effects (transparency,
+  blur, rounded corners). No fullscreen — apps stay in their normal
+  compositing pipeline.
 
-**1 window -> fullscreen-like, but with transparency preserved**
+- **Multiple windows**: switches to tabbed layout, focuses the newest
+  window automatically.
 
-- `border none`
-- `layout splith` (removes sway tab/stack bars)
-- fills entire workspace
-- compositor effects remain (blur, transparency)
+- **Respects user choice**: if you manually change the layout away from
+  tabbed (e.g., to splith, splitv, or stacking), the daemon stops
+  managing that workspace. Management resumes when you switch back to
+  tabbed or the window count drops to one.
 
-**2+ windows -> automatic tabbed layout**
+- **Never steals focus**: if you are working on another output, the
+  daemon will not pull keyboard focus to the managed output.
 
-- restores original borders of all windows
-- switches workspace to `layout tabbed`
-- focuses new windows as they appear
+- **Border preservation**: saves each window's original border style
+  (`normal`, `pixel`, `none`, `csd` + width) before modifying it.
+  Restores it exactly when transitioning to tabbed, when a floating
+  dialog appears, or when the window leaves the managed output.
 
-**Respects user behavior**
+- **Clean window departure**: when a window moves away from the managed
+  output (via keybind, script, or drag), the daemon automatically
+  restores its original border and removes management marks.
 
-- If you switch layout away from tabbed, daemon backs off
-  until layout returns to tabbed or window count becomes 1.
+- **Floating fullscreen awareness**: when a floating fullscreen app
+  (like mpv) appears, the daemon backs off. When it closes, focus
+  returns to the window you were using before — even if that window
+  is on a different output.
 
-**Never steals focus**
+- **User-fullscreen safe**: if you press F11 (or equivalent) on a
+  managed window, the daemon does not interfere. If a second window
+  opens while the first is user-fullscreened, the daemon correctly
+  disables fullscreen before transitioning to tabbed.
 
-- If you are working on another output, smart-borders never pulls focus.
+- **Graceful instance replacement**: starting a new instance
+  automatically terminates the previous one via PID file — no
+  `pkill` needed.
 
-**Border save/restore**
+### Focus-Back Mode
 
-- Before manipulating a window, its full border configuration is saved
-  (`normal`, `pixel`, `none`, `csd`, width).
-- When transitioning to tabbed or when the window moves to another output,
-  the original border is restored exactly.
+An independent mode that tracks window focus globally across all
+outputs.
 
-**Departed window cleanup**
+- **Core behavior**: when a window closes and it was the focused
+  window, focus is restored to the window that was focused when it
+  was created.
 
-- When a window leaves the managed output (e.g., moved by script or keybind),
-  smart-borders automatically restores its border and removes management marks.
+- **Launchers are transparent**: wofi, rofi, dmenu, bemenu, fuzzel,
+  tofi, kickoff, swaynag, wlogout, nwg-drawer, ulauncher, and albert
+  are excluded from the focus chain by default. When an excluded app
+  is used to open another app, closing that app returns focus to what
+  you had before the launcher, not to the launcher itself.
 
-**mpv / fullscreen float awareness**
+- **Parent-chain walking**: if the parent window is also gone, the
+  engine walks up the chain until it finds a living ancestor on a
+  visible workspace.
 
-- When a floating fullscreen app (like mpv) appears:
-  - daemon temporarily backs off
-  - tracks the window you were using BEFORE mpv
-- When mpv closes:
-  - focus returns to that earlier window
-    (even if it is on a different output)
+- **No focus stealing**: only triggers when the focused window closes.
+  Background closes (unfocused windows closing) are completely ignored.
+
+- **Runs independently**: separate PID file from monitor mode. Can be
+  used standalone or alongside any number of monitor mode instances.
 
 ---
 
-### Focus-Back Mode (global)
+## How It Works
 
-An independent mode that tracks window focus globally across all displays.
+### Monitor Mode
 
-When a window closes, smart-borders automatically restores focus to
-the window that launched it (terminal -> mpv -> close -> return focus to terminal).
+The daemon subscribes to sway window and workspace events via IPC.
+On each relevant event:
 
-**Launchers are skipped** (transparent):
+1. Reads the container tree for the target output
+2. Counts tiled and floating windows on the visible workspace
+3. Checks for state changes (skips if nothing changed)
+4. Applies the appropriate policy:
 
-- wofi, rofi, dmenu, bemenu, fuzzel, tofi, kickoff
-- swaynag, wlogout, nwg-drawer, ulauncher, albert
+| Tiled | Floats | Condition             | Action                                    |
+|-------|--------|-----------------------|-------------------------------------------|
+| 0     | any    | —                     | No-op                                     |
+| 1     | 0      | not managed yet       | `border none` + `layout splith` + mark    |
+| 1     | 0      | managed, layout drift | Reset to `layout splith`                  |
+| 1     | >0     | managed               | Restore border (dialog needs context)     |
+| 1     | —      | user fullscreened     | Back off                                  |
+| 2+    | —      | `_auto_fs` present    | Transition: restore → tabbed → focus new  |
+| 2+    | —      | tabbed, no mark       | Focus new arrivals only                   |
+| 2+    | —      | not tabbed, no mark   | Back off (user changed layout)            |
 
-When a launcher is used to open an app, closing that app returns focus to the
-window that existed before the launcher opened.
+### Focus-Back Mode
 
-Also includes:
+Processes every window event individually (no debouncing — order
+matters for correct tracking):
 
-- parent-chain walking (terminal -> app1 -> app2 -> if app1 dead, go to terminal)
-- no focus stealing (only triggers when the focused window closes)
-
-Monitor mode and focus-back mode can run together or independently.
+- **`new` event**: records `parent[new_window] = last_focused_normal`
+- **`focus` event**: updates tracking; excluded apps do not update the
+  "normal" tracker, making them transparent
+- **`close` event**: if the closed window was focused, walks the parent
+  chain to find a living ancestor on a visible workspace and focuses it
 
 ---
 
 ## Building
 
-Requires:
+### Dependencies
 
-- Rust 1.70+
-- sway 1.8+
-- jq (only used by helper script, not by daemon)
+- Rust toolchain (1.70+)
+- sway (tested with 1.8+)
+- jq (only for the move-to-monitor helper script)
 
-Build:
+### Compile
 
     git clone https://github.com/menkaur/sway-monocle-layout.git
-    cd smart-borders
+    cd sway-monocle-layout
     cargo build --release
 
-Install:
+The binary is at `target/release/sway-monocle-layout`.
 
-    cp target/release/smart-borders-dp2 ~/.local/bin/
+### Install
+
+    cp target/release/sway-monocle-layout ~/.local/bin/
     cp move-to-monitor.sh ~/.local/bin/
     chmod +x ~/.local/bin/move-to-monitor.sh
 
@@ -110,91 +161,122 @@ Install:
 
 ### Monitor Mode
 
-Run for a specific output:
+Manage a single output:
 
-    smart-borders-dp2 <OUTPUT>
+    sway-monocle-layout <OUTPUT>
 
-Examples:
-
-    smart-borders-dp2 DP-2
-    smart-borders-dp2 HDMI-A-1 --pidfile /run/user/1000/hdmi.pid
-
-Find output names:
+Where `<OUTPUT>` is the sway output name (e.g., `DP-2`, `HDMI-A-1`).
+Find your output names with:
 
     swaymsg -t get_outputs | jq -r '.[].name'
 
 Options:
 
-    --pidfile <PATH>   Override PID file location
-    -h, --help         Show help
+| Option              | Description                                                            |
+|---------------------|------------------------------------------------------------------------|
+| `--pidfile <PATH>`  | Override PID file location (default: `/tmp/sway-monocle-<output>.pid`) |
+| `-h`, `--help`      | Show help                                                              |
+
+Examples:
+
+    # Manage DP-2
+    sway-monocle-layout DP-2
+
+    # Manage HDMI-A-1 with custom PID file
+    sway-monocle-layout HDMI-A-1 --pidfile /run/user/1000/hdmi.pid
+
+    # Manage multiple outputs (each is independent)
+    sway-monocle-layout DP-1 &
+    sway-monocle-layout DP-2 &
 
 ### Focus-Back Mode
 
-Global focus restoration:
+Track focus globally and restore it when launched applications close:
 
-    smart-borders-dp2 --focus-back
-
-Optional exclusions:
-
-    smart-borders-dp2 --focus-back --exclude myapp,otherapp
+    sway-monocle-layout --focus-back
 
 Options:
 
-    --exclude <APPS>   Comma-separated app_ids to add to exclusion list
-    --pidfile <PATH>   Override PID file
+| Option              | Description                                                     |
+|---------------------|-----------------------------------------------------------------|
+| `--exclude <APPS>`  | Comma-separated app_ids to add to the built-in exclusion list   |
+| `--pidfile <PATH>`  | Override PID file (default: `/tmp/sway-monocle-focus-back.pid`) |
+
+Examples:
+
+    # Basic usage
+    sway-monocle-layout --focus-back
+
+    # Add custom exclusions
+    sway-monocle-layout --focus-back --exclude myapp,otherapp
+
+    # Custom PID file
+    sway-monocle-layout --focus-back --pidfile /run/user/1000/fb.pid
 
 ### Running Both Together
 
-    smart-borders-dp2 DP-2 &
-    smart-borders-dp2 --focus-back &
+Monitor mode and focus-back mode are fully independent — they use
+separate PID files and do not interfere with each other:
 
-Each mode uses a separate PID file and will not kill the other.
+    sway-monocle-layout DP-2 &
+    sway-monocle-layout --focus-back &
+
+Starting a new instance of the same mode gracefully replaces the
+previous one. Starting a different mode has no effect on running
+instances.
 
 ---
 
 ## Sway Configuration
 
-Add to ~/.config/sway/config:
+Add to your `~/.config/sway/config`:
 
-    # Manage DP-2 with auto-tabbed layout
-    exec_always smart-borders-dp2 DP-2
+    # Monocle layout management on DP-2
+    exec_always sway-monocle-layout DP-2
 
-    # Global focus restoration
-    exec_always smart-borders-dp2 --focus-back
+    # Focus-back (optional, independent)
+    exec_always sway-monocle-layout --focus-back
 
-    # Keybinds to move windows between monitors
+    # Move window to other monitor (adjust keybinds to taste)
     bindsym $mod+bracketleft  exec move-to-monitor.sh DP-1
     bindsym $mod+bracketright exec move-to-monitor.sh DP-2
 
-### Optional enhancements
+`exec_always` ensures the daemon restarts on sway config reload.
+The new instance automatically kills the previous one via the PID
+file — no `pkill` needed.
 
-    # Hide bar on DP-2
+### Recommended Companion Settings
+
+    # Remove gaps on managed output for true edge-to-edge single window
+    workspace 5 gaps inner 0
+    workspace 5 gaps outer 0
+
+    # Hide bar on managed output (optional)
     bar {
         output DP-2
         mode hide
     }
 
-    # Edge-to-edge single-window look
-    workspace * gaps inner 0
-    workspace * gaps outer 0
-
-    # Custom default border style
+    # Default border style (the daemon saves and restores whatever you set)
     default_border pixel 2
 
 ### Multi-Output Example
 
-    exec_always smart-borders-dp2 DP-1
-    exec_always smart-borders-dp2 DP-2
-    exec_always smart-borders-dp2 HDMI-A-1
-    exec_always smart-borders-dp2 --focus-back
+    # Each output managed independently
+    exec_always sway-monocle-layout DP-1
+    exec_always sway-monocle-layout DP-2
+    exec_always sway-monocle-layout HDMI-A-1
+
+    # Focus-back is global (only one instance needed)
+    exec_always sway-monocle-layout --focus-back
 
 ---
 
 ## Move-to-Monitor Script
 
-The companion script for moving windows between outputs. The daemon handles
-all cleanup (border restore, mark removal) automatically when a window departs
-the managed output.
+A minimal helper script for moving windows between outputs. The daemon
+handles all cleanup (border restoration, mark removal) automatically
+when a window departs the managed output.
 
 ### move-to-monitor.sh
 
@@ -202,6 +284,7 @@ the managed output.
     TARGET="$1"
     [ -z "$TARGET" ] && exit 1
 
+    # Get target output geometry for cursor warp
     eval $(swaymsg -t get_outputs | jq -r \
       ".[] | select(.name == \"$TARGET\") | \
        \"OX=\(.rect.x) OY=\(.rect.y) OW=\(.rect.width) OH=\(.rect.height)\"")
@@ -210,136 +293,159 @@ the managed output.
     CX=$((OX + OW / 2))
     CY=$((OY + OH / 2))
 
+    # Capture the con_id of the focused window BEFORE the move
     CON_ID=$(swaymsg -t get_tree | jq -r \
       '.. | select(.focused? == true and .pid? > 0) | .id' | head -1)
     [ -z "$CON_ID" ] && exit 1
 
+    # Move, explicitly focus on target output, warp cursor
     swaymsg "move container to output $TARGET; \
              [con_id=$CON_ID] focus; \
              seat seat0 cursor set $CX $CY"
 
-### What the script does
+### What It Does
 
 1. Looks up the target output geometry
 2. Captures the focused window container ID
 3. Moves the container, focuses it on the target, warps the cursor
 
-### What the daemon handles automatically
+### What the Daemon Handles Automatically
 
-When a window leaves the managed output, the daemon detects the departure and:
+When a window leaves the managed output, the daemon detects the
+departure and:
 
-- Restores the window's original border style
-- Removes the _auto_fs management mark
+- Restores the original border style of the window
+- Removes the `_auto_fs` management mark
 - No action needed from the script or the user
 
 ---
 
-## Detailed Behavior Reference
+## Behavior Reference
 
 ### Single Window on Managed Output
 
-| Event                        | Daemon Action                                      |
-|------------------------------|---------------------------------------------------|
-| Window opens                 | border none + layout splith + mark _auto_fs       |
-| Floating dialog appears      | Restore border, remove mark                        |
-| Dialog closes                | Re-apply border none + mark                        |
-| User fullscreens manually    | Daemon backs off (no _auto_fs on that window)      |
+| Event                        | Daemon Action                                  |
+|------------------------------|------------------------------------------------|
+| Window opens                 | `border none` + `layout splith` + mark         |
+| Floating dialog appears      | Restore original border, remove mark           |
+| Dialog closes                | Re-apply `border none` + mark                  |
+| User fullscreens (F11)       | Daemon backs off                               |
+| Window moves to other output | Restore border, remove mark                    |
 
 ### Multiple Windows on Managed Output
 
-| Event                        | Daemon Action                                      |
-|------------------------------|---------------------------------------------------|
-| 2nd window opens             | Restore border on 1st, layout tabbed, focus 2nd   |
-| 3rd+ window opens            | Focus the new window (layout already tabbed)       |
-| Window closes (2->1)         | Remaining window gets border none + layout splith  |
-| User changes layout          | Daemon backs off completely                        |
-| User changes back to tabbed  | Daemon resumes (focuses new arrivals)              |
+| Event                        | Daemon Action                                  |
+|------------------------------|------------------------------------------------|
+| 2nd window opens (1→2)      | Restore 1st border, `layout tabbed`, focus 2nd |
+| 3rd+ window opens            | Focus the new window (already tabbed)          |
+| Window closes (2→1)         | Remaining window: `border none` + `splith`     |
+| User changes layout          | Daemon backs off completely                    |
+| User changes back to tabbed  | Daemon resumes (focuses new arrivals)          |
+| User-fs + new window         | Disable fs, restore, tabbed, focus new         |
 
 ### Cross-Output Focus (mpv Example)
 
-| Event                        | Daemon Action                                      |
-|------------------------------|---------------------------------------------------|
-| mpv opens fullscreen-float   | Save globally focused window (e.g. terminal on DP-1)|
-| mpv closes                   | Restore focus to saved window if still visible     |
-| Saved window was closed      | Sway default focus behavior takes over             |
-| Saved window on hidden ws    | Same - no forced focus                             |
+| Event                        | Daemon Action                                  |
+|------------------------------|------------------------------------------------|
+| mpv opens fullscreen-float   | Save globally focused window (e.g., terminal)  |
+| mpv closes                   | Focus saved window if still on visible ws      |
+| Saved window closed          | Sway default focus takes over                  |
+| Saved window on hidden ws    | No forced focus                                |
 
 ### Focus-Back (Independent Mode)
 
-| Event                        | Engine Action                                      |
-|------------------------------|---------------------------------------------------|
-| New window opens             | Record parent = last non-excluded focused window   |
-| Window closes (was focused)  | Walk parent chain, focus first living ancestor     |
-| Window closes (not focused)  | Ignored - never steals focus                       |
-| Excluded app closes          | Parent chain skips it transparently                |
+| Event                        | Engine Action                                  |
+|------------------------------|------------------------------------------------|
+| New window opens             | Record parent = last non-excluded focused win  |
+| Window closes (was focused)  | Walk parent chain, focus first living ancestor |
+| Window closes (not focused)  | Ignored — never steals focus                   |
+| Excluded app (wofi) closes   | Parent chain skips it transparently            |
 
 Example chain:
 
-    terminal -> wofi -> firefox -> (close firefox) -> terminal
+    terminal → wofi → firefox → (close firefox) → terminal
 
-Even though wofi focused itself and then firefox,
+Even though wofi had focus between terminal and firefox,
 focus returns to terminal, not wofi.
 
 ---
 
 ## FAQ
 
-**Does this slow down sway or add input latency?**
+### Does this slow down sway or add input latency?
 
-No. The daemon is a separate process communicating via Unix socket IPC.
-It has no access to sway input or rendering pipeline. Each IPC call
-takes less than 0.5ms. Zero commands during idle states.
+No. The daemon is a separate process that communicates via Unix socket
+IPC. It has no access to the sway input or rendering pipeline. Each IPC
+call takes less than 0.5ms. The daemon issues zero commands when idle
+(state-change detection skips unchanged states). Stability polling uses
+adaptive backoff to minimize IPC pressure.
 
-**Does it steal keyboard focus?**
+### What happens if the daemon crashes?
 
-Never, unless a deliberate transition occurs (new window in tabbed mode
-on the managed output, mpv close restore, focus-back on close).
+Windows keep whatever state they had. On restart, the daemon re-reads
+the tree and applies the correct policy. The only artifact is that
+windows may retain the `_auto_fs` mark and `border none` from the
+previous session — the daemon will adopt them on the next relevant
+event.
 
-**What happens if the daemon crashes?**
+### Can I use this with gaps?
 
-Windows keep whatever state they had. On restart, the daemon re-reads the
-tree and applies the correct policy. The only artifact is windows may
-retain the _auto_fs mark and border none from the previous session.
+Yes. `border none` does not affect gaps. If you want true edge-to-edge
+for single windows, set gaps to 0 on the managed workspaces.
 
-**Can I use this with gaps?**
+### Does this work with XWayland apps?
 
-Yes. border none does not affect gaps. Set gaps to 0 on the managed
-workspace for true edge-to-edge single windows.
+Yes. The daemon operates on the sway container tree, which abstracts
+over the client protocol. Focus-back mode reads both `app_id`
+(Wayland) and `window_properties.class` (X11) for exclusion matching.
 
-**Does this work with XWayland apps?**
+### What if I do not want focus-back?
 
-Yes. The daemon operates on sway container tree, which abstracts over
-the client protocol. Focus-back mode reads both app_id (Wayland) and
-window_properties.class (X11) for exclusion matching.
+Only run monitor mode:
 
-**Can I exclude an app from focus-back by window title?**
-
-Not currently. Exclusion matches on app_id or window_properties.class.
-
-**What if I only want the tabbed layout, no focus-back?**
-
-    exec_always smart-borders-dp2 DP-2
+    exec_always sway-monocle-layout DP-2
 
 Focus-back is entirely optional and independent.
 
-**What if I only want focus-back, no layout management?**
+### What if I only want focus-back?
 
-    exec_always smart-borders-dp2 --focus-back
+Only run focus-back mode:
+
+    exec_always sway-monocle-layout --focus-back
+
+No monitor management will occur.
+
+### Can I manage multiple outputs?
+
+Yes. Run one monitor-mode instance per output:
+
+    exec_always sway-monocle-layout DP-1
+    exec_always sway-monocle-layout DP-2
+
+Each instance manages exactly one output with its own PID file.
+
+### Does the move-to-monitor script work without the daemon?
+
+Yes. The script moves, focuses, and warps the cursor. Without the
+daemon, the window keeps whatever border state it has. No errors.
 
 ---
 
 ## Project Structure
 
     src/
-    +-- main.rs          Entry point, CLI parsing, mode routing
-    +-- config.rs        Constants and runtime configuration
-    +-- ipc.rs           Sway IPC transport (Unix socket)
-    +-- tree.rs          Data types and JSON tree parsing
-    +-- snapshot.rs      State acquisition and stability verification
-    +-- events.rs        Event subscription and extraction
-    +-- pid.rs           PID file management, single-instance enforcement
-    +-- policy.rs        Monitor mode decision engine
-    +-- focus_back.rs    Focus-back engine
+    ├── main.rs          Entry point, CLI parsing, mode routing
+    ├── config.rs        Constants and runtime configuration
+    ├── ipc.rs           Sway IPC transport (Unix socket)
+    ├── tree.rs          Data types and JSON tree parsing
+    ├── snapshot.rs      State acquisition and stability verification
+    ├── events.rs        Event subscription and extraction
+    ├── pid.rs           PID file management, single-instance enforcement
+    ├── policy.rs        Monitor mode decision engine
+    └── focus_back.rs    Focus-back engine
+
+    scripts/
+    └── move-to-monitor.sh   Helper for moving windows between outputs
 
 ---
 
