@@ -1,28 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-// FILE: src/policy.rs
-// ROLE: Monitor mode decision engine.
-//
-// LLM CONTEXT:
-//   v3.5 — COMPLETE FEATURE SET:
-//
-//   • Single window: border none + layout splith
-//   • Multi window: tabbed + focus new arrivals
-//   • Border save/restore with IPC failure safety
-//   • Departed window cleanup (restore_departed_windows)
-//   • Global focus tracking for float-fs (mpv) handling
-//   • Layout drift correction for single window
-//   • Focus gating on any_focused
-//
-//   KNOWN EDGE CASE (documented, not fixed):
-//   When focus-back mode runs simultaneously AND multiple
-//   float-fs windows are open from different parent windows,
-//   closing the last float-fs may briefly conflict: focus-back
-//   restores per-window parent, then monitor mode overrides to
-//   its saved_focused (from when the FIRST float-fs appeared).
-//   The user ends up on a known window either way. The conflict
-//   requires: both modes + multiple float-fs + different parents.
-// ═══════════════════════════════════════════════════════════════
-
 use std::collections::HashMap;
 
 use tokio::time::{sleep, Duration};
@@ -330,6 +305,16 @@ impl Policy {
             let mut cmd = String::new();
 
             for id in &auto_fs_ids {
+                // If a managed window was also user-fullscreened
+                // (e.g., user pressed F11 on a border-none window),
+                // disable fullscreen before transitioning to tabbed.
+                // Without this, the new window would be hidden
+                // behind the fullscreen window.
+                let is_fs = snap.tiled.iter().any(|w| w.id == *id && w.is_fs());
+                if is_fs {
+                    cmd.push_str(&format!("[con_id={id}] fullscreen disable; "));
+                }
+
                 let restore = self.border_restore_cmd(*id);
                 cmd.push_str(&format!(
                     "[con_id={id}] {restore}; \
