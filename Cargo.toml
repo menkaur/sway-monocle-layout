@@ -1,5 +1,5 @@
 [package]
-name = "smart-borders-dp2"
+name = "sway-monocle-layout"
 version = "2.2.0"
 edition = "2021"
 description = "A monocle layout for Sway"
