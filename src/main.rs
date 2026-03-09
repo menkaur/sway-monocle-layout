@@ -1,32 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-// FILE: src/main.rs
-// ROLE: Entry point — CLI argument parsing, mode routing.
-//
-// LLM CONTEXT:
-//   TWO MODES:
-//
-//   MONITOR MODE (existing):
-//     smart-borders-dp2 <OUTPUT> [--pidfile <PATH>]
-//     Manages a sway output as a single-focus display.
-//
-//   FOCUS-BACK MODE (new in v3.5):
-//     smart-borders-dp2 --focus-back [--exclude <APPS>] [--pidfile <PATH>]
-//     Tracks focus globally and restores focus to the "launcher"
-//     window when a launched application closes.
-//
-//   Both modes can run simultaneously (separate PID files).
-//
-// MODULES:
-//   mod config      — constants + runtime config
-//   mod ipc         — sway IPC transport
-//   mod tree        — types and parsing
-//   mod snapshot    — state acquisition
-//   mod events      — event subscription and extraction
-//   mod pid         — PID file management
-//   mod policy      — monitor mode decision engine
-//   mod focus_back  — focus-back engine
-// ═══════════════════════════════════════════════════════════════
-
 mod config;
 mod events;
 mod focus_back;
@@ -63,34 +34,33 @@ enum Mode {
 fn print_usage() -> ! {
     let bin = env::args()
         .next()
-        .unwrap_or_else(|| "smart-borders-dp2".to_string());
+        .unwrap_or_else(|| "sway-monocle-layout".to_string());
     eprintln!(
         "Usage:\n\
          \n\
          MONITOR MODE:\n\
-         {bin} <OUTPUT> [--pidfile <PATH>]\n\
+           {bin} <OUTPUT> [--pidfile <PATH>]\n\
          \n\
-         Manages a sway output as a single-focus display:\n\
-         1 window → borderless, 2+ windows → tabbed layout.\n\
+           Manages a sway output: 1 window = borderless monocle,\n\
+           2+ windows = tabbed layout.\n\
          \n\
          FOCUS-BACK MODE:\n\
-         {bin} --focus-back [--exclude <APPS>] [--pidfile <PATH>]\n\
+           {bin} --focus-back [--exclude <APPS>] [--pidfile <PATH>]\n\
          \n\
-         Tracks focus globally.  When a window closes, restores\n\
-         focus to the window that was focused when it was created.\n\
-         Launchers (wofi, rofi, etc.) are transparent in the chain.\n\
+           Tracks focus globally. When a window closes, restores\n\
+           focus to the window that was focused when it was created.\n\
          \n\
          Options:\n\
-         --pidfile <PATH>      Override PID file location\n\
-         --exclude <APPS>      Comma-separated app_ids to exclude\n\
-                               (added to built-in defaults)\n\
-         -h, --help            Show this help message\n\
+           --pidfile <PATH>      Override PID file location\n\
+           --exclude <APPS>      Comma-separated app_ids to exclude\n\
+                                 (added to built-in defaults)\n\
+           -h, --help            Show this help message\n\
          \n\
          Examples:\n\
-         {bin} DP-2\n\
-         {bin} HDMI-A-1 --pidfile /run/user/1000/dp2.pid\n\
-         {bin} --focus-back\n\
-         {bin} --focus-back --exclude myapp,otherapp\n\
+           {bin} DP-2\n\
+           {bin} HDMI-A-1 --pidfile /run/user/1000/dp2.pid\n\
+           {bin} --focus-back\n\
+           {bin} --focus-back --exclude myapp,otherapp\n\
          \n\
          Both modes can run simultaneously."
     );
@@ -155,9 +125,7 @@ fn parse_args() -> Mode {
 
     if focus_back {
         if output.is_some() {
-            eprintln!(
-                "Error: --focus-back and <OUTPUT> are mutually exclusive\n"
-            );
+            eprintln!("Error: --focus-back and <OUTPUT> are mutually exclusive\n");
             print_usage();
         }
         Mode::FocusBack { excludes, pidfile }
@@ -178,9 +146,7 @@ async fn main() {
 
     match mode {
         Mode::FocusBack { excludes, pidfile } => {
-            let pidfile = pidfile.unwrap_or_else(|| {
-                "/tmp/smart-borders-focus-back.pid".to_string()
-            });
+            let pidfile = pidfile.unwrap_or_else(|| "/tmp/sway-monocle-focus-back.pid".to_string());
             focus_back::run(excludes, pidfile).await;
         }
         Mode::Monitor { output, pidfile } => {
@@ -197,15 +163,13 @@ async fn run_monitor(output: String, pidfile: Option<String>) {
 
     let our_pid = std::process::id();
     eprintln!(
-        "[smart-borders] pid {our_pid} managing output '{}', pidfile '{}'",
+        "[monocle] pid {our_pid} managing output '{}', pidfile '{}'",
         config::target_output(),
         config::pidfile()
     );
 
-    let mut sigterm =
-        signal(SignalKind::terminate()).expect("failed to register SIGTERM");
-    let mut sigint =
-        signal(SignalKind::interrupt()).expect("failed to register SIGINT");
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to register SIGINT");
 
     sleep(Duration::from_millis(500)).await;
 
@@ -217,9 +181,7 @@ async fn run_monitor(output: String, pidfile: Option<String>) {
         let mut stream = match subscribe_events().await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "[smart-borders] subscription failed: {e}, retrying in 1s"
-                );
+                eprintln!("[monocle] subscription failed: {e}, retrying in 1s");
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -229,13 +191,13 @@ async fn run_monitor(output: String, pidfile: Option<String>) {
             let event = tokio::select! {
                 _ = sigterm.recv() => {
                     eprintln!(
-                        "[smart-borders] pid {our_pid} received SIGTERM"
+                        "[monocle] pid {our_pid} received SIGTERM"
                     );
                     break 'outer;
                 }
                 _ = sigint.recv() => {
                     eprintln!(
-                        "[smart-borders] pid {our_pid} received SIGINT"
+                        "[monocle] pid {our_pid} received SIGINT"
                     );
                     break 'outer;
                 }
@@ -283,12 +245,10 @@ async fn run_monitor(output: String, pidfile: Option<String>) {
             }
         }
 
-        eprintln!(
-            "[smart-borders] disconnected from sway, reconnecting in 1s"
-        );
+        eprintln!("[monocle] disconnected from sway, reconnecting in 1s");
         sleep(Duration::from_secs(1)).await;
     }
 
     cleanup_pidfile(config::pidfile());
-    eprintln!("[smart-borders] pid {our_pid} shutdown complete");
+    eprintln!("[monocle] pid {our_pid} shutdown complete");
 }

@@ -1,26 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-// FILE: src/tree.rs
-// ROLE: Data types and parsing functions for sway's container tree.
-//
-// LLM CONTEXT:
-//   TYPES:
-//     • WinInfo  — one tiled window
-//     • Snapshot — workspace state on the target output
-//
-//   v3.4 CHANGE:
-//     Snapshot now includes `global_focused: Option<i64>` — the
-//     con_id of the globally focused leaf window.  Populated by
-//     snapshot.rs from the same get_tree call (zero extra IPC).
-//     Used by policy.rs to continuously track global focus so the
-//     "launcher" window is known before mpv steals focus.
-//
-//   PARSING FUNCTIONS:
-//     • parse_win, collect_tiled, count_floating,
-//       has_focused_descendant, find_focused_window, contains_con_id
-//
-//   This file has NO dependencies on any other module.
-// ═══════════════════════════════════════════════════════════════
-
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -51,13 +28,6 @@ pub struct Snapshot {
     pub float_n: usize,
     pub float_fs: usize,
     pub any_focused: bool,
-    /// Con_id of the globally focused leaf window (across ALL
-    /// outputs).  Extracted from the same get_tree call as the
-    /// rest of the snapshot — zero extra IPC cost.
-    ///
-    /// Used by policy.rs to continuously track global focus.
-    /// When a floating fullscreen app (mpv) appears, the
-    /// PREVIOUSLY tracked value identifies the launcher window.
     pub global_focused: Option<i64>,
 }
 
@@ -81,10 +51,7 @@ pub fn parse_win(v: &Value) -> Option<WinInfo> {
                     .collect()
             })
             .unwrap_or_default(),
-        focused: v
-            .get("focused")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false),
+        focused: v.get("focused").and_then(|x| x.as_bool()).unwrap_or(false),
         border: v
             .get("border")
             .and_then(|x| x.as_str())

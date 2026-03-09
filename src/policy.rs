@@ -1,35 +1,26 @@
 // ═══════════════════════════════════════════════════════════════
 // FILE: src/policy.rs
-// ROLE: The decision-making engine.
+// ROLE: Monitor mode decision engine.
 //
 // LLM CONTEXT:
-//   v3.5 — DEPARTED WINDOW CLEANUP:
+//   v3.5 — COMPLETE FEATURE SET:
 //
-//   Added restore_departed_windows(): when a window with _auto_fs
-//   and border none moves away from the managed output, the daemon
-//   restores its original border and removes the _auto_fs mark.
+//   • Single window: border none + layout splith
+//   • Multi window: tabbed + focus new arrivals
+//   • Border save/restore with IPC failure safety
+//   • Departed window cleanup (restore_departed_windows)
+//   • Global focus tracking for float-fs (mpv) handling
+//   • Layout drift correction for single window
+//   • Focus gating on any_focused
 //
-//   This eliminates the need for move-to-monitor.sh to check for
-//   _auto_fs, undo fullscreen/border, capture con_id, find window
-//   center, or do a resize nudge.  The script becomes minimal.
-//
-//   DETECTION: compare saved_borders keys against current tiled
-//   list.  Any key NOT in tiled is a departed window.  Batch-
-//   restore borders + unmark, then remove from HashMap.
-//
-//   prune_saved_borders REMOVED — restore_departed_windows handles
-//   all cleanup.  Entries are only cleared after a successful
-//   sway_cmd.  Dead entries from closed windows are negligible
-//   (~16 bytes each).  This prevents IPC failure from losing
-//   saved borders.
-//
-//   ALL OTHER BEHAVIOR UNCHANGED FROM v3.4.
-//
-// DEPENDENCIES:
-//   • src/ipc.rs: sway_cmd()
-//   • src/snapshot.rs: snapshot(), snapshot_stable(),
-//     is_on_visible_workspace()
-//   • src/tree.rs: Snapshot, WinInfo
+//   KNOWN EDGE CASE (documented, not fixed):
+//   When focus-back mode runs simultaneously AND multiple
+//   float-fs windows are open from different parent windows,
+//   closing the last float-fs may briefly conflict: focus-back
+//   restores per-window parent, then monitor mode overrides to
+//   its saved_focused (from when the FIRST float-fs appeared).
+//   The user ends up on a known window either way. The conflict
+//   requires: both modes + multiple float-fs + different parents.
 // ═══════════════════════════════════════════════════════════════
 
 use std::collections::HashMap;
@@ -39,8 +30,6 @@ use tokio::time::{sleep, Duration};
 use crate::ipc::sway_cmd;
 use crate::snapshot::{is_on_visible_workspace, snapshot, snapshot_stable};
 use crate::tree::{Snapshot, WinInfo};
-
-// ── State-change detection ─────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Dp2State {
@@ -52,11 +41,7 @@ struct Dp2State {
 
 impl Dp2State {
     fn from_snapshot(snap: &Snapshot) -> Self {
-        let mut windows: Vec<(i64, i64)> = snap
-            .tiled
-            .iter()
-            .map(|w| (w.id, w.fs))
-            .collect();
+        let mut windows: Vec<(i64, i64)> = snap.tiled.iter().map(|w| (w.id, w.fs)).collect();
         windows.sort();
         Self {
             windows,
@@ -70,8 +55,6 @@ impl Dp2State {
         self.windows.iter().any(|(wid, _)| *wid == id)
     }
 }
-
-// ── Policy engine ──────────────────────────────────────────────
 
 pub struct Policy {
     prev_focused: Option<i64>,
@@ -98,7 +81,7 @@ impl Policy {
 
     pub async fn apply(&mut self, hint: Option<i64>) {
         if let Err(e) = self.run(hint).await {
-            eprintln!("[smart-borders] policy error: {e}");
+            eprintln!("[monocle] policy error: {e}");
         }
     }
 
@@ -149,20 +132,6 @@ impl Policy {
         self.saved_borders.remove(&id);
     }
 
-    /// Restore borders and remove _auto_fs marks on windows that
-    /// left this output (moved to another output or closed).
-    ///
-    /// For moved windows: commands restore the original border.
-    /// For closed windows: sway ignores commands for dead con_ids.
-    ///
-    /// Entries are ONLY cleared from saved_borders after a
-    /// successful sway_cmd.  On IPC failure, entries persist so
-    /// the next cycle retries with the correct border.
-    ///
-    /// This replaces prune_saved_borders — no separate prune step
-    /// is needed.  Dead entries from closed windows where sway_cmd
-    /// succeeded are cleaned up.  Dead entries from closed windows
-    /// where sway_cmd failed persist but are negligible (~16 bytes).
     async fn restore_departed_windows(&mut self, snap: &Snapshot) {
         let current_ids: Vec<i64> = snap.tiled.iter().map(|w| w.id).collect();
 
@@ -202,10 +171,7 @@ impl Policy {
 
     // ── Core logic ─────────────────────────────────────────────
 
-    async fn run(
-        &mut self,
-        hint: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(&mut self, hint: Option<i64>) -> Result<(), Box<dyn std::error::Error>> {
         let snap = match snapshot_stable(hint).await {
             Some(s) => s,
             None => return Ok(()),
@@ -233,10 +199,6 @@ impl Policy {
 
         self.last_state = Some(current_state);
 
-        // Restore borders on windows that left this output.
-        // Replaces the old prune_saved_borders — entries are only
-        // cleared after successful restore, preventing border loss
-        // on IPC failure.
         self.restore_departed_windows(&snap).await;
 
         let tree_focus = snap.tiled.iter().find(|w| w.focused).map(|w| w.id);
@@ -300,10 +262,7 @@ impl Policy {
 
     // ── Single-window policy ───────────────────────────────────
 
-    async fn handle_single(
-        &mut self,
-        snap: &Snapshot,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_single(&mut self, snap: &Snapshot) -> Result<(), Box<dyn std::error::Error>> {
         let w = &snap.tiled[0];
 
         if w.is_fs() && !w.has_auto_fs() {
@@ -340,12 +299,9 @@ impl Policy {
             .await
             .ok();
         } else if snap.ws_layout != "splith" {
-            sway_cmd(&format!(
-                "[workspace={}] layout splith",
-                snap.ws_name
-            ))
-            .await
-            .ok();
+            sway_cmd(&format!("[workspace={}] layout splith", snap.ws_name))
+                .await
+                .ok();
         }
 
         Ok(())
@@ -382,15 +338,10 @@ impl Policy {
             }
 
             for w in &snap.tiled {
-                cmd.push_str(&format!(
-                    "[con_id={}] split none; ", w.id
-                ));
+                cmd.push_str(&format!("[con_id={}] split none; ", w.id));
             }
 
-            cmd.push_str(&format!(
-                "[workspace={}] layout tabbed",
-                snap.ws_name
-            ));
+            cmd.push_str(&format!("[workspace={}] layout tabbed", snap.ws_name));
 
             let cmd_result = sway_cmd(&cmd).await;
 
@@ -402,12 +353,7 @@ impl Policy {
 
             if snap.any_focused {
                 let focus_target = hint
-                    .or_else(|| {
-                        snap.tiled
-                            .iter()
-                            .find(|w| !w.has_auto_fs())
-                            .map(|w| w.id)
-                    })
+                    .or_else(|| snap.tiled.iter().find(|w| !w.has_auto_fs()).map(|w| w.id))
                     .or_else(|| snap.tiled.first().map(|w| w.id));
 
                 if let Some(fid) = focus_target {
@@ -439,11 +385,7 @@ impl Policy {
             if !snap.any_focused {
                 return;
             }
-            let actual = snap
-                .tiled
-                .iter()
-                .find(|w| w.focused)
-                .map(|w| w.id);
+            let actual = snap.tiled.iter().find(|w| w.focused).map(|w| w.id);
             if actual == Some(expected_id) {
                 return;
             }

@@ -9,6 +9,10 @@ repository = "https://github.com/menkaur/sway-monocle-layout.git"
 keywords = ["sway", "wayland", "tiling", "layout"]
 categories = ["command-line-utilities"]
 
+[[bin]]
+name = "sway-monocle-layout"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt", "time", "net", "io-util", "signal", "macros"] }
 serde_json = "1"
@@ -18,4 +22,3 @@ libc = "0.2"
 opt-level = "z"
 lto = true
 strip = true
-

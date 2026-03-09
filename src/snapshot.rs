@@ -1,43 +1,10 @@
-// ═══════════════════════════════════════════════════════════════
-// FILE: src/snapshot.rs
-// ROLE: Reads the current state of the target output from sway's
-//       tree, with optional stability verification.
-//
-// LLM CONTEXT:
-//   FUNCTIONS:
-//     • snapshot() → Option<Snapshot>
-//       Single-read from one get_tree call.
-//
-//     • snapshot_stable(expected_id) → Option<Snapshot>
-//       Polls snapshot() until tiled count is stable on two
-//       consecutive reads.  If expected_id provided, also waits
-//       for that window to appear.
-//
-//       v3.5 CHANGE: adaptive backoff.  First 10 iterations at
-//       STABLE_INTERVAL (1ms) for fast convergence in the typical
-//       case (2-3 iterations).  After 10 iterations, backs off to
-//       5ms to reduce IPC pressure on sway in pathological cases
-//       (many windows opening simultaneously).
-//
-//     • is_on_visible_workspace(target_id) → bool
-//       One get_tree call.  Checks if a con_id exists on any
-//       visible workspace across all outputs.
-//
-// DEPENDENCIES:
-//   • src/config.rs: config::target_output(), STABLE_INTERVAL,
-//     STABLE_MAX_TRIES
-//   • src/ipc.rs: sway_tree()
-//   • src/tree.rs: Snapshot, collect_tiled, count_floating,
-//     has_focused_descendant, find_focused_window, contains_con_id
-// ═══════════════════════════════════════════════════════════════
-
 use tokio::time::{sleep, Duration};
 
 use crate::config::{self, STABLE_INTERVAL, STABLE_MAX_TRIES};
 use crate::ipc::sway_tree;
 use crate::tree::{
-    collect_tiled, contains_con_id, count_floating,
-    find_focused_window, has_focused_descendant, Snapshot,
+    collect_tiled, contains_con_id, count_floating, find_focused_window, has_focused_descendant,
+    Snapshot,
 };
 
 pub async fn snapshot() -> Option<Snapshot> {
@@ -50,24 +17,14 @@ pub async fn snapshot() -> Option<Snapshot> {
         .get("nodes")?
         .as_array()?
         .iter()
-        .find(|n| {
-            n.get("name").and_then(|v| v.as_str()) == Some(target)
-        })?;
+        .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(target))?;
 
-    let focus_id = output
-        .get("focus")?
-        .as_array()?
-        .first()?
-        .as_i64()?;
+    let focus_id = output.get("focus")?.as_array()?.first()?.as_i64()?;
 
-    let ws = output
-        .get("nodes")?
-        .as_array()?
-        .iter()
-        .find(|n| {
-            n.get("id").and_then(|v| v.as_i64()) == Some(focus_id)
-                && n.get("type").and_then(|v| v.as_str()) == Some("workspace")
-        })?;
+    let ws = output.get("nodes")?.as_array()?.iter().find(|n| {
+        n.get("id").and_then(|v| v.as_i64()) == Some(focus_id)
+            && n.get("type").and_then(|v| v.as_str()) == Some("workspace")
+    })?;
 
     let ws_name = ws.get("name")?.as_str()?.to_owned();
 
@@ -141,16 +98,6 @@ pub async fn snapshot_stable(expected_id: Option<i64>) -> Option<Snapshot> {
         prev_count = Some(count);
         last_good = Some(snap);
 
-        // Adaptive backoff:
-        //   First 10 iterations: STABLE_INTERVAL (1ms)
-        //     → Fast convergence for the typical case (2-3 reads)
-        //   After 10 iterations: 5ms
-        //     → Reduces IPC pressure on sway's event loop in
-        //       pathological cases (many windows opening at once)
-        //
-        // Typical case: converges in 2-3ms (2-3 iterations × 1ms)
-        // Worst case ceiling: 10ms + 90×5ms = 460ms with 80%
-        //   less IPC pressure after the initial fast burst
         if i < 10 {
             sleep(STABLE_INTERVAL).await;
         } else {
@@ -161,10 +108,6 @@ pub async fn snapshot_stable(expected_id: Option<i64>) -> Option<Snapshot> {
     last_good
 }
 
-/// Check if a window with the given con_id exists on any currently
-/// visible workspace across all outputs.
-///
-/// Makes one get_tree IPC call.
 pub async fn is_on_visible_workspace(target_id: i64) -> bool {
     let tree = match sway_tree().await {
         Ok(t) => t,
@@ -177,10 +120,7 @@ pub async fn is_on_visible_workspace(target_id: i64) -> bool {
     };
 
     for output in outputs {
-        let name = output
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let name = output.get("name").and_then(|v| v.as_str()).unwrap_or("");
         if name.starts_with("__") {
             continue;
         }
@@ -201,8 +141,7 @@ pub async fn is_on_visible_workspace(target_id: i64) -> bool {
             .and_then(|nodes| {
                 nodes.iter().find(|n| {
                     n.get("id").and_then(|v| v.as_i64()) == Some(focus_id)
-                        && n.get("type").and_then(|v| v.as_str())
-                            == Some("workspace")
+                        && n.get("type").and_then(|v| v.as_str()) == Some("workspace")
                 })
             }) {
             Some(ws) => ws,

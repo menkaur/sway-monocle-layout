@@ -1,3 +1,3 @@
 cargo build --release
-rm -rf ../../smart-borders-dp2
-ln target/release/smart-borders-dp2 ../../smart-borders-dp2
+rm -rf ../../sway-monocle-layout
+ln target/release/sway-monocle-layout ../../sway-monocle-layout

@@ -1,22 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-// FILE: src/pid.rs
-// ROLE: PID file management and single-instance enforcement.
-//
-// LLM CONTEXT:
-//   Both functions take the PID file path as a parameter.
-//   This allows different modes (monitor, focus-back) to use
-//   separate PID files and run simultaneously.
-//
-//   enforce_single_instance(pidfile):
-//     Kills any existing instance, writes our PID.
-//
-//   cleanup_pidfile(pidfile):
-//     Removes the PID file only if it contains our PID.
-//
-// DEPENDENCIES:
-//   • libc crate: kill() syscall
-// ═══════════════════════════════════════════════════════════════
-
 use std::fs;
 use std::process;
 use std::time::{Duration, Instant};
@@ -37,7 +18,8 @@ pub fn enforce_single_instance(pidfile: &str) {
             let our_pid = process::id();
             if old_pid != our_pid && process_alive(old_pid) {
                 eprintln!(
-                    "[smart-borders] sending SIGTERM to previous instance (pid {old_pid})"
+                    "[monocle] sending SIGTERM to previous instance \
+                     (pid {old_pid})"
                 );
                 send_signal(old_pid, libc::SIGTERM);
 
@@ -47,7 +29,7 @@ pub fn enforce_single_instance(pidfile: &str) {
                 while process_alive(old_pid) {
                     if Instant::now() >= deadline {
                         eprintln!(
-                            "[smart-borders] previous instance (pid {old_pid}) \
+                            "[monocle] previous instance (pid {old_pid}) \
                              did not exit after 2s, sending SIGKILL"
                         );
                         send_signal(old_pid, libc::SIGKILL);
@@ -58,9 +40,7 @@ pub fn enforce_single_instance(pidfile: &str) {
                 }
 
                 if !process_alive(old_pid) {
-                    eprintln!(
-                        "[smart-borders] previous instance (pid {old_pid}) exited"
-                    );
+                    eprintln!("[monocle] previous instance (pid {old_pid}) exited");
                 }
             }
         }
