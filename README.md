@@ -94,7 +94,7 @@ Requires:
 
 Build:
 
-    git clone https://github.com/youruser/smart-borders.git
+    git clone https://github.com/menkaur/sway-monocle-layout.git
     cd smart-borders
     cargo build --release
 
