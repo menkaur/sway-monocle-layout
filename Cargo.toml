@@ -2,7 +2,12 @@
 name = "smart-borders-dp2"
 version = "2.2.0"
 edition = "2021"
-description = "Manages a sway output as a single-focus display"
+description = "A monocle layout for Sway"
+authors = ["Arsen Zahray"]
+license = "MIT"
+repository = "https://github.com/menkaur/sway-monocle-layout.git"
+keywords = ["sway", "wayland", "tiling", "layout"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "time", "net", "io-util", "signal", "macros"] }
@@ -13,3 +18,4 @@ libc = "0.2"
 opt-level = "z"
 lto = true
 strip = true
+
